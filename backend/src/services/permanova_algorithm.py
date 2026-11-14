@@ -1,4 +1,5 @@
-import math
+import math,hashlib,json
+from itertools import combinations
 import numpy as np
 
 def permanova_statistics(clr,labels):
@@ -43,3 +44,62 @@ def permutation_test(clr,labels,permutations=199,seed=2026):
     observed=permanova_statistics(clr,labels);rng=np.random.default_rng(seed);null=[]
     for _ in range(permutations):null.append(permanova_statistics(clr,rng.permutation(labels).tolist())['R2'])
     return {**observed,"null_R2":null,"permutations":permutations,**upper_tail_p(observed['R2'],null)}
+
+def _pair_seed(root_seed,group_a,group_b):
+    digest=hashlib.sha256(json.dumps([root_seed,group_a,group_b],ensure_ascii=False,separators=(",",":")).encode('utf-8')).digest()
+    return int.from_bytes(digest[:4],'big')&0x7fffffff
+
+def _constant_rows(rows):
+    return len(rows)>0 and bool(np.all(rows==rows[0]))
+
+def _holm(pairs):
+    testable=[p for p in pairs if p['p_raw'] is not None]
+    m=len(testable);running=0.
+    for rank,index in enumerate(sorted(range(m),key=lambda i:(testable[i]['p_raw'],i))):
+        running=max(running,min(1.,(m-rank)*testable[index]['p_raw']))
+        testable[index]['p_adjusted']=running
+        testable[index]['rank']=rank+1
+    return m
+
+def pairwise_permutation_tests(clr,labels,permutations=199,seed=2026):
+    if type(permutations) is not int or not 199<=permutations<=999:raise ValueError("置换数须为199–999整数")
+    if type(seed) is not int or not 0<=seed<=2147483647:raise ValueError("种子须为非负32位整数")
+    try:Z=np.asarray(clr,dtype=float)
+    except (TypeError,ValueError,OverflowError):raise ValueError("CLR须为有限二维矩阵")
+    if Z.ndim!=2 or len(Z)<4 or not 2<=Z.shape[1]<=8 or not np.isfinite(Z).all():raise ValueError("至少4行、2–8维有限CLR")
+    if len(labels)!=len(Z) or any(not isinstance(g,str) or not g for g in labels):raise ValueError("每行须有非空字符串组标签")
+    labels=np.asarray(labels);groups=sorted(set(labels.tolist()))
+    if not 2<=len(groups)<=5:raise ValueError("要求2–5个预定义组")
+    indices={g:np.flatnonzero(labels==g) for g in groups}
+    pairs=[]
+    for group_a,group_b in combinations(groups,2):
+        ia,ib=indices[group_a],indices[group_b]
+        entry={"group_a":group_a,"group_b":group_b,"n_a":int(len(ia)),"n_b":int(len(ib)),"n":int(len(ia)+len(ib)),
+               "permutations":permutations,"pair_seed":_pair_seed(seed,group_a,group_b),"testable":False,"reason":"",
+               "R2":None,"F":None,"F_status":None,"p_raw":None,"p_adjusted":None,"rank":None}
+        if len(ia)<2 or len(ib)<2:
+            entry["reason"]="每组至少2个独立样本，样本不足，不可检验";pairs.append(entry);continue
+        constant=[group for group,ix in ((group_a,ia),(group_b,ib)) if _constant_rows(Z[ix])]
+        if constant:
+            entry["reason"]="组内CLR恒定（"+"、".join(constant)+"），不可检验";pairs.append(entry);continue
+        subset=np.vstack([Z[ia],Z[ib]]);subset_labels=[group_a]*len(ia)+[group_b]*len(ib)
+        try:observed=permanova_statistics(subset.tolist(),subset_labels)
+        except ValueError as e:
+            entry["reason"]=str(e);pairs.append(entry);continue
+        centered=subset-subset.mean(axis=0);sst=math.fsum(float(v*v) for v in centered.flat)
+        if not sst>0:entry["reason"]="两组合并CLR平方和SST=0，不可检验";pairs.append(entry);continue
+        rng=np.random.default_rng(entry["pair_seed"]);null=[];has_a=np.zeros(len(subset),dtype=bool);has_a[:len(ia)]=True
+        for _ in range(permutations):
+            mask=has_a[rng.permutation(len(subset))];mean_a=centered[mask].mean(axis=0);mean_b=centered[~mask].mean(axis=0)
+            ssb=len(ia)*float(mean_a@mean_a)+len(ib)*float(mean_b@mean_b)
+            null.append(min(1.,max(0.,ssb/sst)))
+        tail=upper_tail_p(observed['R2'],null)
+        entry.update({"testable":True,"R2":observed['R2'],"F":observed['F'],"F_status":observed['F_status'],
+                      "p_raw":tail['p'],"extreme":tail['extreme'],"resolution":tail['resolution']})
+        pairs.append(entry)
+    family_size=_holm(pairs)
+    return {"method":"holm","method_label":"Holm逐步降序，控制族错误率","family_size":family_size,"pairs_total":len(pairs),
+            "testable_pairs":family_size,"untestable_pairs":len(pairs)-family_size,"permutations":permutations,"seed":seed,
+            "pairs":pairs,
+            "correction_scope":"运行级固定：同时校正全部可检验工艺对，不随查看或切换工艺对改变。",
+            "note":"每对只在自身两组样本子集内独立置换标签并派生独立种子；组内CLR恒定或样本不足的对标为不可检验，p留空且不参与Holm显著性排序；同一种子重算一致。"}

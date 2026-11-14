@@ -30,8 +30,8 @@ JWT角色在后端执行，viewer写入403、analyst审批403、未获批导出4
 3. 09:10 查看 `LS-03` 恒定组成边界，SST=0、PERMANOVA未定义，系统拒绝运行。
 4. 09:15 为LS-02冻结δ=.001、B199、seed2026，创建“三工艺组成复核”；系统保留原量、闭合份额、替换后份额和CLR。
 5. 09:16 独立worker固定各组规模置换标签，保存199个null R²，以R²上尾含并列+1求全局p。
-6. 09:20 真实HTTP运行的LS-02得到R²约.02814246、pseudo-F约.99903、p=.435。这份数据未给出强组差证据，仍可为未检出限与δ假设做独立补样。
-7. 09:25 写三工艺同规模补样说明，注明仅报告组内距离描述、未正式检验离散度同质、不将组差当工艺原因。
+6. 09:20 真实HTTP运行的LS-02得到R²约.02814246、pseudo-F约.99903、p=.435。全局p不指出具体工艺对；同一运行的三个工艺对各自独立置换（同B=199、各自派生种子），原始p与Holm校正后p一并保存，切换查看某一对不改变校正家族。
+7. 09:25 写三工艺同规模补样说明，注明仅报告组内距离描述、未正式检验离散度同质、不将组差当工艺原因；工艺对检验为事后比较，不可当作因果或保证。
 8. 10:00 罗岑批准归档，程禾以阅读者下载 `composition-run-N.csv`，供独立复配补样核对。
 
 ## 六页与五实体
@@ -67,11 +67,23 @@ Aitchison距离 = ||CLR(x) − CLR(y)||₂
 - W=0且T>0时R²=1、F无界，JSON以F=null/F_status=unbounded表示；置换仍保存有限R²，检验继续。
 - F超数值范围时另标numerical_overflow，不伪造有限值或写JSON Infinity。
 
-B199–999次均匀置换标签，组规模保持，固定seed与自然键排序复现。固定N/k自由度下R²与F单调等价，因此null只保存R²，包含完美分离情况。p=(1+#null R²≥观测R²)/(B+1)。当前v2以 `64*eps*max(1,|观测R²|,max|null R²|)` 作声明的机器尺度并列保护，避免数学同一划分被浮点分组汇总顺序漏计；该保护只用于R²比较，不用于SST拒绝。
+B199–999次均匀置换标签，组规模保持，固定seed与自然键排序复现。固定N/k自由度下R²与F单调等价，因此null只保存R²，包含完美分离情况。p=(1+#null R²≥观测R²)/(B+1)。v2起以 `64*eps*max(1,|观测R²|,max|null R²|)` 作声明的机器尺度并列保护，避免数学同一划分被浮点分组汇总顺序漏计；该保护只用于R²比较，不用于SST拒绝，v3工艺对检验沿用同一上尾规则。
 
-全局组差也可受组内离散度影响，只给到组CLR质心的平均/最大距离描述，未正式检验离散度同质；独立与零假设下标签可交换是前提。不是工艺因果、性能概率、逐组对照p或事后选择保证。p最小分辨率1/(B+1)，有Monte Carlo波动。
+全局组差也可受组内离散度影响，只给到组CLR质心的平均/最大距离描述，未正式检验离散度同质；独立与零假设下标签可交换是前提。不是工艺因果、性能概率或事后选择保证。p最小分辨率1/(B+1)，有Monte Carlo波动。
 
-当前算法/指纹版本为 `closure-replacement-clr-permanova-v2`。v1在真实6点夹具的数学并列漏计曾被独立复核发现；v2修复、空卷重跑及原证据详见TESTING，不用历史v1运行冒充最终结果。
+### 全部工艺对检验
+
+全局p只回答“是否存在组差”，不能说明哪两个工艺不同；逐对手算又容易漏掉多重比较。因此每次分析在同一冻结的替换后CLR样本上，额外检验全部 k(k−1)/2 个工艺对：
+
+- 每对只取该对两组样本，在自身子集内独立置换标签（两组规模固定），观测R²与null R²按两组合并中心计算，与上面全局公式一致。
+- 每对的随机种子由 `sha256(根seed|组A|组B)` 派生，互不共享随机流；同一根种子、同一批样本重算一致，标签或行序改变不改变该对观测统计量。
+- 对可检验工艺对采用Holm逐步降序统一校正，`p_adjusted`与校正排名随运行一并保存。校正家族在运行级固定为全部可检验对，查看或聚焦某一对只改变界面高亮，不重算、不缩小校正范围。
+- 某工艺组组内CLR恒定（所有样本同一组成）或该组样本不足2个时，该对标为**不可检验**：`testable=false`，R²/原始p/校正后p留空（`null`），不参与Holm排序，也不会被当成p=1。若两组合并后SST=0同样不可检验。
+- 缺值（`null`）不参与显著性排序；结果页保留各对样本数、原始p与校正后p，导出CSV在样本矩阵后追加`pairwise_section`说明行、`pairwise`汇总行与`pair`明细行。
+
+历史运行（v2及更早）的result中没有`pairwise`字段；读取API会补一个`legacy=true`的占位对象，结果页明确提示“历史运行未保存工艺对检验”，不会伪造对p。重跑同一快照即可得到v3对检验结果。
+
+当前算法/指纹版本为 `closure-replacement-clr-permanova-pairwise-v3`。v1在真实6点夹具的数学并列漏计曾被独立复核发现；v2修复该并列保护；v3在v2全局PERMANOVA之上增加全部工艺对独立置换与Holm校正。空卷重跑及原证据详见TESTING，不用历史v1运行冒充最终结果。
 
 ## 工程与开发
 
@@ -94,6 +106,6 @@ npm run dev
 
 `backend/src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}` 按来源、变换、PERMANOVA、运行、审阅和横切拆分；`backend/scripts/seed_demo.py`；migration为可选索引，metadata首次建表，非独立全量DDL。`frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}` 为Vue应用。
 
-RunSummary跨首页/结果/审阅，GroupProfiles跨首页/结果，CompositionMatrix跨来源/结果，另有StudySelector、PermutationPlot及通用DataTable/Notice/StatusBadge。两hooks useResearch/useAction及utils处理公共状态。角色枚举backend/constants/roles与frontend/constants/enums参与鉴权/角色显示，队列状态backend/constants/status与前端RunStatus参与worker/StatusBadge，审阅Literal在backend/schemas/note和model/service/前端ReviewStatus。
+RunSummary跨首页/结果/审阅，GroupProfiles跨首页/结果，PairwiseTests在结果页展示全部工艺对，CompositionMatrix跨来源/结果，另有StudySelector、PermutationPlot及通用DataTable/Notice/StatusBadge。两hooks useResearch/useAction及utils处理公共状态。角色枚举backend/constants/roles与frontend/constants/enums参与鉴权/角色显示，队列状态backend/constants/status与前端RunStatus参与worker/StatusBadge，审阅Literal在backend/schemas/note和model/service/前端ReviewStatus。
 
 .env含COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、JWT_SECRET、SEED_DEMO，DATABASE_URL/REDIS_URL由Compose定义。源码不含测试截图/日志；关键JSON/CSV、截图与已知差异在同批test-artifacts/gb-0029。当前为单worker研究系统，无来源上传、多worker去重、崩溃恢复或真实设备操作。清理仅本题：`docker compose down -v --remove-orphans`。MIT License。
